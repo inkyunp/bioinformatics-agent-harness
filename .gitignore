@@ -1,0 +1,31 @@
+# Credentials and local authentication state
+.env
+**/.env
+auth.json
+**/auth.json
+*.pem
+*.key
+
+# Runtime-only files
+*.pid
+*.pid_file
+run/
+logs/
+
+# Bioinformatics data must stay outside GitHub
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+*.tbi
+*.h5ad
+*.rds
+
+# Local files
+.DS_Store
