@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Experimental Headlong LLM adapter backed by the authenticated Codex CLI.
+
+die() {
+  printf 'codex-exec-adapter: error: %s\n' "$*" >&2
+  exit 1
+}
+
+model=""
+max_tokens=""
+system_prompt_file=""
+effort=""
+thinking=""
+no_stream=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      [[ $# -ge 2 ]] || die "--model requires a value"
+      model="$2"
+      shift 2
+      ;;
+    --max-tokens)
+      [[ $# -ge 2 ]] || die "--max-tokens requires a value"
+      max_tokens="$2"
+      shift 2
+      ;;
+    --system-prompt-file)
+      [[ $# -ge 2 ]] || die "--system-prompt-file requires a path"
+      system_prompt_file="$2"
+      shift 2
+      ;;
+    --effort)
+      [[ $# -ge 2 ]] || die "--effort requires a value"
+      effort="$2"
+      shift 2
+      ;;
+    --thinking)
+      if [[ $# -ge 2 && "$2" != --* ]]; then
+        thinking="$2"
+        shift 2
+      else
+        thinking="default"
+        shift
+      fi
+      ;;
+    --no-stream)
+      no_stream=1
+      shift
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+command -v codex >/dev/null 2>&1 || die "codex CLI is not installed or not on PATH"
+[[ -z "$system_prompt_file" || -f "$system_prompt_file" ]] || \
+  die "system prompt file not found: $system_prompt_file"
+
+request_file=$(mktemp "${TMPDIR:-/tmp}/headlong-codex-request.XXXXXX")
+response_file=$(mktemp "${TMPDIR:-/tmp}/headlong-codex-response.XXXXXX")
+trap 'rm -f "$request_file" "$response_file"' EXIT
+
+cat > "$request_file" <<'EOF'
+You are acting as a raw completion backend for the Headlong agent harness.
+Do not use tools, do not edit files, and do not explain your process.
+Follow the supplied system prompt and conversation exactly. Return only the
+assistant completion text that Headlong requested. If the system prompt asks
+for a bash code block, return the bash code block and nothing else.
+
+--- HEADLONG SYSTEM PROMPT ---
+EOF
+
+if [[ -n "$system_prompt_file" ]]; then
+  cat "$system_prompt_file" >> "$request_file"
+fi
+
+cat >> "$request_file" <<'EOF'
+
+--- HEADLONG CONVERSATION ---
+EOF
+
+messages=$(cat)
+jq -e 'type == "array"' >/dev/null <<<"$messages" || \
+  die "stdin is not a JSON messages array"
+
+jq -r '.[] |
+  "[" + (.role // "unknown" | ascii_upcase) + "]\n" +
+  (if (.content | type) == "string" then .content else (.content | tostring) end) +
+  "\n"' <<<"$messages" >> "$request_file"
+
+if [[ -n "$model" ]]; then
+  codex_args=(exec --ephemeral --sandbox read-only --model "$model")
+else
+  codex_args=(exec --ephemeral --sandbox read-only)
+fi
+
+cat >> "$request_file" <<EOF
+
+--- REQUEST METADATA ---
+Requested max output tokens: ${max_tokens:-unspecified}
+Requested effort: ${effort:-unspecified}
+Requested thinking: ${thinking:-unspecified}
+Streaming requested: $([[ "$no_stream" -eq 1 ]] && printf 'no' || printf 'yes')
+EOF
+
+codex "${codex_args[@]}" "$(cat "$request_file")" >"$response_file" || {
+  status=$?
+  die "codex exec failed with exit code $status"
+}
+
+cat "$response_file"
